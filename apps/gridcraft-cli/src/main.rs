@@ -17,13 +17,16 @@
 #![forbid(unsafe_code)]
 
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-/// `println!` that ends the program quietly when stdout is closed (`gridcraft-cli commands |
-/// head`) instead of panicking on a broken pipe.
+static STDOUT_CLOSED: AtomicBool = AtomicBool::new(false);
+
+/// `println!` that suppresses further output when a reader closes stdout, while allowing work to finish.
 macro_rules! outln {
     ($($arg:tt)*) => {{
-        use std::io::Write as _;
-        if let Err(e) = writeln!(std::io::stdout(), $($arg)*) {
+        if !$crate::STDOUT_CLOSED.load(std::sync::atomic::Ordering::Relaxed)
+            && let Err(e) = $crate::write_stdout(format_args!("{}\n", format_args!($($arg)*)))
+        {
             $crate::stdout_failed(e);
         }
     }};
@@ -45,20 +48,38 @@ const USAGE: &str = "usage:
                      [--out FILE] [--print RANGE] [--quiet]
                      a script line is id={json} or {\"command\": \"id\", \"params\": {…}};
                      blank lines and lines starting with # or // are skipped
+                     closing stdout does not cancel work; cancel the process to stop it
   gridcraft-cli commands [--json] [--search X]
   gridcraft-cli functions [--json] [--search X] [--category C]
   gridcraft-cli mcp [--connect PORT] [--in FILE | --sample NAME]
   gridcraft-cli send <port> <method> [json]
   gridcraft-cli version";
 
-/// stdout went away. A reader that stopped early (a closed pipe) ends the program quietly; any
-/// other write error is reported.
-fn stdout_failed(e: std::io::Error) -> ! {
-    if e.kind() == std::io::ErrorKind::BrokenPipe {
-        std::process::exit(0);
+fn write_stdout(args: std::fmt::Arguments<'_>) -> std::io::Result<()> {
+    use std::io::Write as _;
+    #[cfg(unix)]
+    {
+        // Stdout suppresses EBADF, so write through a duplicate to report invalid destinations.
+        use std::os::fd::AsFd as _;
+        let stdout = std::io::stdout();
+        std::fs::File::from(stdout.as_fd().try_clone_to_owned()?).write_fmt(args)
     }
-    eprintln!("gridcraft-cli: can't write to stdout: {e}");
-    std::process::exit(1);
+    #[cfg(not(unix))]
+    {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        out.write_fmt(args).and_then(|()| out.flush())
+    }
+}
+
+/// Stop writing after a reader closes the pipe; report any other write error.
+fn stdout_failed(e: std::io::Error) {
+    if e.kind() == std::io::ErrorKind::BrokenPipe {
+        STDOUT_CLOSED.store(true, Ordering::Relaxed);
+    } else {
+        eprintln!("gridcraft-cli: can't write to stdout: {e}");
+        std::process::exit(1);
+    }
 }
 
 fn main() -> ExitCode {

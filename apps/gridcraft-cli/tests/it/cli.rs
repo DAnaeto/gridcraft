@@ -22,6 +22,64 @@ fn tmpdir(name: &str) -> PathBuf {
     d
 }
 
+#[cfg(unix)]
+fn run_with_closed_stdout(args: &[&str]) -> Output {
+    // Hold the shell until the read end is closed, so the first result always sees EPIPE.
+    let mut child = Command::new("sh")
+        .args(["-c", "IFS= read -r ready; exec \"$@\"", "sh", env!("CARGO_BIN_EXE_gridcraft-cli")])
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    writeln!(child.stdin.take().unwrap(), "go").unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn broken_stdout_still_runs_later_commands_and_saves_workbook() {
+    let dir = tmpdir("broken-stdout-save");
+    let book = dir.join("out.xlsx");
+    let out = run_with_closed_stdout(&[
+        "run",
+        "--cmd",
+        r#"cell.set={"cell":"A1","input":"first"}"#,
+        "--cmd",
+        r#"cell.set={"cell":"A2","input":"saved"}"#,
+        "--out",
+        book.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(book.exists(), "workbook was not saved");
+    assert_eq!(ok(&["cat", book.to_str().unwrap(), "--range", "A1:A2"]).split_whitespace().collect::<Vec<_>>(), ["first", "saved"]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn broken_stdout_does_not_hide_later_work_or_save_errors() {
+    let dir = tmpdir("broken-stdout-errors");
+    let book = dir.join("missing").join("out.xlsx");
+    let fail_save = run_with_closed_stdout(&["run", "--cmd", r#"cell.set={"cell":"A1","input":"first"}"#, "--out", book.to_str().unwrap()]);
+    assert!(!fail_save.status.success(), "save failure must be reported");
+    let fail_command = run_with_closed_stdout(&["run", "--cmd", r#"cell.set={"cell":"A1","input":"first"}"#, "--cmd", "no.such.command"]);
+    assert!(!fail_command.status.success(), "later command failure must be reported");
+    assert!(String::from_utf8_lossy(&fail_command.stderr).contains("no.such.command"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn stdout_errors_other_than_broken_pipe_fail() {
+    let read_only = std::fs::File::open(env!("CARGO_BIN_EXE_gridcraft-cli")).unwrap();
+    let out = bin().arg("version").stdout(Stdio::from(read_only)).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("can't write to stdout"));
+}
+
 #[test]
 fn version_and_usage() {
     assert_eq!(ok(&["--version"]).trim(), format!("gridcraft-cli {}", env!("CARGO_PKG_VERSION")));
