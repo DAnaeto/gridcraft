@@ -32,6 +32,17 @@ macro_rules! outln {
     }};
 }
 
+macro_rules! errln {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        if let Err(e) = writeln!(std::io::stderr().lock(), $($arg)*)
+            && e.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            std::process::exit(1);
+        }
+    }};
+}
+
 mod check;
 
 use gridcraft_engine::Session;
@@ -62,7 +73,7 @@ fn write_stdout(args: std::fmt::Arguments<'_>) -> std::io::Result<()> {
         // Stdout suppresses EBADF, so write through a duplicate to report invalid destinations.
         use std::os::fd::AsFd as _;
         let stdout = std::io::stdout();
-        std::fs::File::from(stdout.as_fd().try_clone_to_owned()?).write_fmt(args)
+        std::fs::File::from(stdout.as_fd().try_clone_to_owned()?).write_all(args.to_string().as_bytes())
     }
     #[cfg(not(unix))]
     {
@@ -77,7 +88,7 @@ fn stdout_failed(e: std::io::Error) {
     if e.kind() == std::io::ErrorKind::BrokenPipe {
         STDOUT_CLOSED.store(true, Ordering::Relaxed);
     } else {
-        eprintln!("gridcraft-cli: can't write to stdout: {e}");
+        errln!("gridcraft-cli: can't write to stdout: {e}");
         std::process::exit(1);
     }
 }
@@ -110,7 +121,7 @@ fn main() -> ExitCode {
     match r {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("gridcraft-cli: {e}");
+            errln!("gridcraft-cli: {e}");
             ExitCode::FAILURE
         }
     }
@@ -180,7 +191,7 @@ fn exec(s: &mut Session, id: &str, params: Value) -> Result<Value, String> {
         && let Some(warnings) = value.get("warnings").and_then(Value::as_array)
     {
         for warning in warnings.iter().filter_map(Value::as_str) {
-            eprintln!("Warning: {warning}");
+            errln!("Warning: {warning}");
         }
     }
     r
@@ -313,13 +324,13 @@ fn convert(args: &[String]) -> Result<(), String> {
     activate_sheet(&mut s, a.opt("sheet"))?;
     if pdf {
         let result = exec(&mut s, "file.exportPdf", json!({"path": out}))?;
-        eprintln!("wrote {out} ({} bytes, {} pages)", result["bytes"], result["pages"]);
+        errln!("wrote {out} ({} bytes, {} pages)", result["bytes"], result["pages"]);
         return Ok(());
     }
     let d = s.doc().map_err(|e| e.to_string())?;
     let bytes = gridcraft_engine::io::save_file_bytes(&d.wb, out).map_err(|e| e.to_string())?;
     gridcraft_engine::io::write_file(out, &bytes).map_err(|e| e.to_string())?;
-    eprintln!("wrote {out} ({} bytes)", bytes.len());
+    errln!("wrote {out} ({} bytes)", bytes.len());
     Ok(())
 }
 
@@ -472,7 +483,7 @@ fn run(args: &[String]) -> Result<(), String> {
     }
     if let Some(out) = a.opt("out") {
         let r = exec(&mut s, "file.save", json!({"path": out}))?;
-        eprintln!("wrote {out} ({} bytes)", r["bytes"]);
+        errln!("wrote {out} ({} bytes)", r["bytes"]);
     }
     for (name, range) in &a.opts {
         if name == "print" {
@@ -512,7 +523,7 @@ fn commands(args: &[String]) -> Result<(), String> {
         outln!("{:<w$}  {}{menu}{sc}", c.id, c.label.trim_end_matches('…'));
         outln!("{:<w$}    {}", "", c.params);
     }
-    eprintln!("{} commands", list.len());
+    errln!("{} commands", list.len());
     Ok(())
 }
 
@@ -539,7 +550,7 @@ fn functions(args: &[String]) -> Result<(), String> {
         let desc = f["description"].as_str().unwrap_or("");
         outln!("    {cat}: {desc}");
     }
-    eprintln!("{} functions", list.len());
+    errln!("{} functions", list.len());
     Ok(())
 }
 
@@ -570,7 +581,7 @@ fn mcp(args: &[String]) -> Result<(), String> {
             Box::new(Headless::with_session(session))
         }
     };
-    eprintln!("gridcraft-cli: MCP server on stdio ({})", backend.describe());
+    errln!("gridcraft-cli: MCP server on stdio ({})", backend.describe());
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     Server::new(backend).serve(stdin.lock(), stdout.lock()).map_err(|e| e.to_string())
