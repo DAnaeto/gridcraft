@@ -45,6 +45,9 @@ gridcraft-cli run [--in FILE | --sample budget|sales|grades] \
 Opens a file (or a sample, or a blank workbook), runs `--cmd` and `--script` steps in the order given, then saves
 `--out` and prints each `--print` range. Each non-null command result is printed as a JSON line unless `--quiet`.
 The first failing step stops the run with a non-zero exit.
+If the reader of a stdout pipe closes early, printed output stops but the run continues, including later steps and a
+requested `--out` save. The exit status is 0 if the work succeeds, or non-zero if it fails. Other stdout write errors
+stop execution with a non-zero exit. Stop the process to cancel the run.
 
 A `--cmd` is `id`, `id={json}` or `id {json}`. A script has one command per line in the same forms, or as JSON objects
 `{"command": "cell.set", "params": {...}}`; blank lines and `#` comments are skipped.
