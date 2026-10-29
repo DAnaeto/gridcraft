@@ -72,8 +72,13 @@ fn write_stdout(args: std::fmt::Arguments<'_>) -> std::io::Result<()> {
     {
         // Stdout suppresses EBADF, so write through a duplicate to report invalid destinations.
         use std::os::fd::AsFd as _;
-        let stdout = std::io::stdout();
-        std::fs::File::from(stdout.as_fd().try_clone_to_owned()?).write_all(args.to_string().as_bytes())
+        use std::sync::{Mutex, OnceLock};
+        static STDOUT: OnceLock<std::io::Result<Mutex<std::fs::File>>> = OnceLock::new();
+        let out = STDOUT.get_or_init(|| std::io::stdout().as_fd().try_clone_to_owned().map(|fd| Mutex::new(std::fs::File::from(fd))));
+        match out {
+            Ok(out) => out.lock().unwrap_or_else(std::sync::PoisonError::into_inner).write_all(args.to_string().as_bytes()),
+            Err(error) => Err(std::io::Error::new(error.kind(), error.to_string())),
+        }
     }
     #[cfg(not(unix))]
     {

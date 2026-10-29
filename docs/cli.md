@@ -34,6 +34,16 @@ cargo install --path apps/gridcraft-cli     # or: cargo run -p gridcraft-cli -- 
 | `send <port> <method> [json]` | `gridcraft-cli send 7979 engine.execute '{"command":"home.bold","params":{"range":"A1:C1"}}'` — one control-channel request to a running app (`gridcraft --control 7979`). |
 | `version` | Prints `gridcraft-cli <version>`. |
 
+## Output pipes
+
+For the result-printing subcommands (all except the MCP JSON-RPC server), a reader closing stdout suppresses
+further result output. Other stdout write errors still fail with a non-zero exit. Commands continue to completion and retain
+normal success/failure status. This also applies to read-only commands such as `cat`, `check`, `commands` and
+`functions`; closing a pipe is not cancellation. Stop the process explicitly to cancel it. The `mcp` server keeps its protocol-specific stream handling.
+
+`check` computes its file reports before printing them, so piping it to `head` does not limit how many files are
+checked. Use narrower input paths to reduce the work; `--max-report` limits displayed examples, not validation.
+
 ## `run`
 
 ```sh

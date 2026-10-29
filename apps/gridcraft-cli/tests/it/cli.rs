@@ -22,23 +22,12 @@ fn tmpdir(name: &str) -> PathBuf {
     d
 }
 
-#[cfg(unix)]
 fn run_with_closed_stdout(args: &[&str]) -> Output {
-    // Hold the shell until the read end is closed, so the first result always sees EPIPE.
-    let mut child = Command::new("sh")
-        .args(["-c", "IFS= read -r ready; exec \"$@\"", "sh", env!("CARGO_BIN_EXE_gridcraft-cli")])
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    drop(child.stdout.take());
-    writeln!(child.stdin.take().unwrap(), "go").unwrap();
-    child.wait_with_output().unwrap()
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    bin().args(args).stdout(writer).output().unwrap()
 }
 
-#[cfg(unix)]
 #[test]
 fn broken_stdout_still_runs_later_commands_and_saves_workbook() {
     let dir = tmpdir("broken-stdout-save");
@@ -58,7 +47,33 @@ fn broken_stdout_still_runs_later_commands_and_saves_workbook() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-#[cfg(unix)]
+#[test]
+fn stdout_closing_after_a_written_line_still_finishes_the_save() {
+    use std::io::{BufRead, BufReader};
+
+    let dir = tmpdir("stdout-closes-after-line");
+    let script = dir.join("steps.txt");
+    let book = dir.join("out.xlsx");
+    let mut steps = format!("{}\n", r#"cell.set={"cell":"A1","input":"first"}"#).repeat(8192);
+    steps.push_str(r#"cell.set={"cell":"A2","input":"saved"}"#);
+    std::fs::write(&script, steps).unwrap();
+    let (reader, writer) = std::io::pipe().unwrap();
+    let child = bin()
+        .args(["run", "--script", script.to_str().unwrap(), "--out", book.to_str().unwrap()])
+        .stdout(writer)
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut reader = BufReader::new(reader);
+    let mut first = String::new();
+    assert!(reader.read_line(&mut first).unwrap() > 0);
+    drop(reader);
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(ok(&["cat", book.to_str().unwrap(), "--range", "A2"]).trim(), "saved");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn broken_stdout_does_not_hide_later_work_or_save_errors() {
     let dir = tmpdir("broken-stdout-errors");
@@ -72,21 +87,17 @@ fn broken_stdout_does_not_hide_later_work_or_save_errors() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-#[cfg(unix)]
 #[test]
 fn closed_stdout_and_stderr_do_not_hide_successful_save() {
-    use std::os::fd::OwnedFd;
-    use std::os::unix::net::UnixStream;
-
     let dir = tmpdir("closed-both-save");
     let book = dir.join("out.xlsx");
-    let (writer, reader) = UnixStream::pair().unwrap();
+    let (reader, writer) = std::io::pipe().unwrap();
     let error_writer = writer.try_clone().unwrap();
     drop(reader);
     let status = bin()
         .args(["run", "--cmd", r#"cell.set={"cell":"A1","input":"saved"}"#, "--out", book.to_str().unwrap()])
-        .stdout(Stdio::from(OwnedFd::from(writer)))
-        .stderr(Stdio::from(OwnedFd::from(error_writer)))
+        .stdout(Stdio::from(writer))
+        .stderr(Stdio::from(error_writer))
         .status()
         .unwrap();
     assert!(status.success(), "successful save must not fail after the reader closes: {status}");
@@ -94,31 +105,46 @@ fn closed_stdout_and_stderr_do_not_hide_successful_save() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-#[cfg(unix)]
 #[test]
 fn closed_stdout_and_stderr_still_report_work_failure() {
-    use std::os::fd::OwnedFd;
-    use std::os::unix::net::UnixStream;
-
-    let (writer, reader) = UnixStream::pair().unwrap();
+    let (reader, writer) = std::io::pipe().unwrap();
     let error_writer = writer.try_clone().unwrap();
     drop(reader);
     let status = bin()
         .args(["run", "--cmd", r#"cell.set={"cell":"A1","input":"first"}"#, "--cmd", "no.such.command"])
-        .stdout(Stdio::from(OwnedFd::from(writer)))
-        .stderr(Stdio::from(OwnedFd::from(error_writer)))
+        .stdout(Stdio::from(writer))
+        .stderr(Stdio::from(error_writer))
         .status()
         .unwrap();
     assert_eq!(status.code(), Some(1), "failed work should exit 1 without panicking");
 }
 
-#[cfg(unix)]
 #[test]
 fn stdout_errors_other_than_broken_pipe_fail() {
     let read_only = std::fs::File::open(env!("CARGO_BIN_EXE_gridcraft-cli")).unwrap();
     let out = bin().arg("version").stdout(Stdio::from(read_only)).output().unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("can't write to stdout"));
+}
+
+#[test]
+fn closed_stdout_preserves_read_only_completion_and_check_failure() {
+    for command in ["commands", "functions"] {
+        let out = run_with_closed_stdout(&[command]);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(String::from_utf8_lossy(&out.stderr).contains(command));
+    }
+    let dir = tmpdir("closed-stdout-check");
+    let book = dir.join("good.xlsx");
+    let bad = dir.join("missing.xlsx");
+    ok(&["run", "--cmd", r#"cell.set={"cell":"A1","input":"1"}"#, "--out", book.to_str().unwrap()]);
+    assert!(!bad.exists());
+    let good = run_with_closed_stdout(&["check", book.to_str().unwrap()]);
+    assert_eq!(good.status.code(), Some(0), "{}", String::from_utf8_lossy(&good.stderr));
+    let out = run_with_closed_stdout(&["check", book.to_str().unwrap(), bad.to_str().unwrap(), "--max-report", "0"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("can't write to stdout"));
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
